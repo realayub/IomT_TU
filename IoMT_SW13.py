@@ -1,18 +1,3 @@
-# Copyright (C) 2011 Nippon Telegraph and Telephone Corporation.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-# implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
@@ -36,12 +21,11 @@ TABLE_0 = 0
 TABLE_1 = 1
 
 
-
-class SimpleSwitch13(app_manager.RyuApp):
+class iomt_switch13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(SimpleSwitch13, self).__init__(*args, **kwargs)
+        super(iomt_switch13, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.sensor_macaddr = self.load_macs("sensors.txt")
         self.device_macaddr = self.load_macs("devices.txt")
@@ -73,24 +57,28 @@ class SimpleSwitch13(app_manager.RyuApp):
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
+        self.add_flow(datapath=datapath,tableid=TABLE_1, priority=0, match=match, actions=actions)
         self.logger.info("Packet in messages disabled")
 
         self.logger.info("Creating Meters")
-        self.create_meter(datapath=datapath, rate=None, meter_id=2)             #meter for af21 
-        self.create_meter(datapath=datapath, rate=None, meter_id=3)             #meter for af31
-        self.create_meter(datapath=datapath, rate=None, meter_id=4)             #meter for af41
+        self.create_meter(datapath=datapath, rate=5000, meter_id=2)             #meter for af21 
+        self.create_meter(datapath=datapath, rate=5000, meter_id=3)             #meter for af31
+        self.create_meter(datapath=datapath, rate=5000, meter_id=4)             #meter for af41
+        self.create_meter(datapath=datapath, rate=1000, meter_id=5)             #meter for be
+        print(ev.msg.datapath.address)
 
-
-        if datapath.id == rpy1_dpid:
-            inst = [parser.OFPInstructionGotoTable(TABLE_1)]
-            mod = parser.OFPFlowMod(datapath=datapath, table_id=TABLE_0, priority = 1, instructions = inst)
-            datapath.send_msg(mod)
-        elif datapath.id == phy1_dpid:
-            pass
-        else:
-            return
         
+        # self.logger.info(ev.msg)
+        # if datapath.id == rpy1_dpid:
+        #     inst = [parser.OFPInstructionGotoTable(TABLE_1)]
+        #     mod = parser.OFPFlowMod(datapath=datapath, table_id=TABLE_0, priority = 1, instructions = inst)
+        #     datapath.send_msg(mod)
+        # elif datapath.id == phy1_dpid:
+        #     pass
+        # else:
+        #     return
+        
+
 
     def create_meter(self, datapath, rate, meter_id):
         bands = []
@@ -101,23 +89,18 @@ class SimpleSwitch13(app_manager.RyuApp):
         datapath.send_msg(metermod)
         self.logger.info("New Meter Created on Switch: %s with ID: %s", datapath.id, meter_id)
         return
+    
 
-    def create_table_zero(self, datapath, tableid):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        if tableid == TABLE_0:
-            inst = [parser.OFPInstructionGotoTable(TABLE_1)]
-
-    def add_flow(self, datapath, tableid, priority, match, actions, buffer_id=None, meterband = None):
+    def add_flow(self, datapath, tableid, priority, match, actions, buffer_id=None, meterid = None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        if meterband == None:
+        if meterid == None:
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
                                              actions)]
         else:
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                             actions), parser.OFPInstructionMeter(meterband,ofproto.OFPIT_METER)]
+                                             actions), parser.OFPInstructionMeter(meterid,ofproto.OFPIT_METER)]
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, table_id=tableid, match=match,
@@ -126,6 +109,21 @@ class SimpleSwitch13(app_manager.RyuApp):
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority, table_id=tableid, 
                                     match=match, instructions=inst)
         datapath.send_msg(mod)
+
+
+
+    def get_dscp(self, macaddr):
+        if macaddr in self.sensor_macaddr:
+            return iptos_ef
+        elif macaddr in self.device_macaddr:
+            return iptos_af41
+        else:
+            return iptos_be
+        
+    def get_meterid(self, dscp_val):
+        return self.dscp_to_meterid[dscp_val]
+    
+
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -166,16 +164,14 @@ class SimpleSwitch13(app_manager.RyuApp):
             if dpid == rpy1_dpid:
                 ip_dscp = self.get_dscp(macaddr=src)
                 self.mac_to_dscp[src] = ip_dscp
-                meterband = None if ip_dscp == iptos_ef else self.get_meterband(ip_dscp)
+
                 match_table0 = parser.OFPMatch(in_port=in_port, eth_dst = dst, eth_src = src)
                 actions_table0 = [parser.OFPActionSetField(ip_dscp=ip_dscp)]
-                self.add_flow(datapath=datapath, table_id = TABLE_0, priority=1000, match=match_table0, actions = actions_table0, buffer_id=(msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None), meterband=None)
-                
+                self.add_flow(datapath=datapath, table_id = TABLE_0, priority=1000, match=match_table0, actions = actions_table0, buffer_id=(msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None), meterid=None)
                 
                 match_table1 = parser.OFPMatch(in_port=in_port, eth_dst = dst, eth_src = src, ip_dscp = ip_dscp)
                 actions_table1 = [parser.OFPActionOutput(out_port)]
-
-                self.add_flow(datapath=datapath, priority=1000, tableid=TABLE_1, match=match_table1, actions = actions_table1, buffer_id=(msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None), meterband=None)
+                self.add_flow(datapath=datapath, priority=1000, tableid=TABLE_1, match=match_table1, actions = actions_table1, buffer_id=(msg.buffer_id if msg.buffer_id != ofproto.OFP_NO_BUFFER else None), meterid=self.get_meterid(dscp_val=ip_dscp))
             elif dpid == phy1_dpid:
                 pass
             else:
@@ -183,18 +179,7 @@ class SimpleSwitch13(app_manager.RyuApp):
 
 
 
-        # actions = [parser.OFPActionOutput(out_port)]
-
-
-
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            # verify if we have a valid buffer_id, if yes avoid to send both
-            # flow_mod & packet_out
-            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                return
-            else:
-                self.add_flow(datapath, 1, match, actions)
+        actions = [parser.OFPActionSetField(ip_dscp=ip_dscp), parser.OFPActionOutput(out_port)]
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data
@@ -203,14 +188,31 @@ class SimpleSwitch13(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
-    def get_dscp(self, macaddr):
-        if macaddr in self.sensor_macaddr:
-            return iptos_ef
-        elif macaddr in self.device_macaddr:
-            return iptos_af41
-        else:
-            return iptos_be
-        
 
-    def get_meterband(self, ip_dscp):
 
+    @set_ev_cls(ofp_event.EventOFPPortDescStatsReply,MAIN_DISPATCHER)
+    def _port_desc_stats_reply_handler(self,ev):
+        msg = ev.msg
+        dpid = msg.datapath.id
+        ofproto = msg.datapath.ofproto
+
+        config_dict = {
+                        ofproto.OFPPC_PORT_DOWN: "Port Down", 
+                        ofproto.OFPPC_NO_RECV: "No Recv", 
+                        ofproto.OFPPC_NO_FWD: "No Forward", 
+                        ofproto.OFPPC_NO_PACKET_IN: "No Packet-In" 
+                    }
+        state_dict = {
+                        ofproto.OFPPS_LINK_DOWN: "Link Down",
+                        ofproto.OFPPS_BLOCKED: "Blocked",
+                        ofproto.OFPPS_LIVE: "Live"
+                    }
+        self.port_features.setdefault(dpid, {})
+        ports = []
+        for p in ev.msg.body:
+            if p.port_no == 0xfffffffe:
+                continue
+            ports.append('port_no = %d hw_addr = %s name = %s config = 0x%08x'
+                        'state = 0x%08x curr = 0x%08x advertised = 0x%08x'
+                        'supported = 0x%08x peer = 0x%08x curr_speed = %d max_speed = %d' %
+                        (p.port_no, p.hw_addr, p.name, p.config, p.state, p.curr, p.advertised, p.supported, p.peer, p.curr_speed, p.max_speed))
